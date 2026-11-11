@@ -1,0 +1,6 @@
+{
+  "dataset": "data/coffee_bottle",
+  "camera": "observation.images.rgb.cam_left_head",
+  "gpu": 0,
+  "semantic_all_candidates": true
+}

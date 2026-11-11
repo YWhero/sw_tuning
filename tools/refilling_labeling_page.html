@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Refilling · 공통 라벨링</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#10151c;color:#e5e9ef;font:15px system-ui}header{padding:18px 22px;background:#19222e;position:sticky;top:0;z-index:1}h1{font-size:20px;margin:0 0 12px}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:10px 0}button,select,input{font:inherit;border:1px solid #52647a;border-radius:6px;padding:8px;background:#243346;color:white}button{cursor:pointer}button:disabled{opacity:.4;cursor:default}button[aria-pressed=true]{background:#126e66;border-color:#66e8c0}input[type=number]{width:90px}#name{width:150px}main{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;padding:18px}section{background:#19222e;border:1px solid #35465a;border-radius:9px;padding:12px;min-width:0}h2{font-size:17px;margin:0 0 8px}.stage{height:58vh;display:flex;align-items:center;justify-content:center;background:#080d13}canvas{max-width:100%;max-height:100%;width:auto;height:auto;cursor:crosshair;touch-action:none}.info{white-space:pre-wrap;font-size:13px;color:#bbcadb;min-height:45px;margin-top:10px}#message{color:#7fe6c4;white-space:pre-wrap}p{font-size:13px;color:#b9c9da;margin:7px 0}.error{color:#ff9e9e!important}@media(max-width:800px){main{grid-template-columns:1fr}.stage{height:45vh}header{position:static}}
+</style>
+<header><h1>Refilling Dispenser · 세 카메라 공통 라벨링</h1>
+<div class="row"><button id="prev" title="이전 에피소드 (←)">← 이전</button><select id="episode" aria-label="에피소드"></select><button id="next" title="다음 에피소드 (→)">다음 →</button><button id="save">저장</button><button id="generate">SAM 마스크 생성</button><label><input id="overlay" type="checkbox" checked> 마스크 표시</label><button id="saveNext">저장 → 다음 에피소드</button></div>
+<div class="row"><label>작업 라벨 <select id="labelSelect" aria-label="작업 라벨"></select></label><input id="name" placeholder="새 라벨 이름" aria-label="새 라벨 이름"><button id="addLabel">+ 라벨 추가</button><label>편집 이미지 <select id="labelScope"><option value="head">왼쪽 헤드캠</option><option value="left">왼쪽 손목캠</option><option value="right">오른쪽 손목캠</option><option value="all">세 카메라 모두</option></select></label><button id="deleteLabel">이 이미지의 라벨 제거</button><button id="clearPrompt">현재 프레임 포인트 제거</button><label><input id="selectedOnly" type="checkbox"> 선택 라벨만 표시</label><button id="include" aria-pressed="true">+ Include</button><button id="exclude" aria-pressed="false">− Exclude</button><button id="undo">↶ 되돌리기</button></div>
+<div class="row"><label>프레임 적용 <select id="scope"><option value="all">세 카메라 모두</option><option value="head">왼쪽 헤드캠</option><option value="left">왼쪽 손목캠</option><option value="right">오른쪽 손목캠</option></select></label><label>프레임 <input id="frame" type="number" min="0" value="0"></label><button id="applyFrame">이동</button><span id="range"></span></div>
+<div class="row"><input id="frameSlider" type="range" min="0" max="0" step="1" value="0" aria-label="에피소드 프레임 탐색" style="flex:1;min-width:150px;padding:0"><span>드래그 후 놓으면 프레임 이동</span></div>
+<p>공통 모드를 선택하고 원하는 이미지에 클릭하세요. 포함 포인트는 라벨 색상, 제외 포인트는 빨간색입니다. 라벨을 바꾼 뒤 해당 대상에 포인트를 찍으세요. 다른 프레임에서도 포인트를 추가할 수 있습니다. 기존 라벨은 유지하고 변경한 라벨만 다시 생성합니다.</p>
+<p>저장은 예시 포인트만 저장합니다. SAM 마스크 생성 버튼으로 저장된 예시를 전파하고, 최종 검토는 이후 진행하며 확인용 동영상은 만들지 않습니다. ← / → 키로 에피소드를 이동할 수 있습니다.</p><div id="message" role="status" aria-live="polite">불러오는 중…</div></header><main id="cameras"></main>
+<script>
+const $=id=>document.getElementById(id), clone=v=>structuredClone(v);
+const cameras=[{key:'head',label:'왼쪽 헤드캠'},{key:'left',label:'왼쪽 손목캠'},{key:'right',label:'오른쪽 손목캠'}];
+const labelNames=new Set(['water bottle']);
+let episodes=[],position=0,mode=1,busy=false,ready=false,history=[];
+for(const c of cameras){
+ const card=document.createElement('section');card.innerHTML=`<h2>${c.label}</h2><div class="stage"><canvas aria-label="${c.label} 포인트 입력"></canvas></div><div class="info"></div>`;
+ $('cameras').append(card);c.canvas=card.querySelector('canvas');c.job={};c.jobInfo=document.createElement('p');card.append(c.jobInfo);c.info=card.querySelector('.info');c.canvas.addEventListener('click',e=>{$('labelScope').value=c.key;addPoint(c,e)});
+}
+function labelColor(name){const colors=['#46dc64','#ffa040','#46b4ff','#e66bd6','#ffe050','#a58aff'];return colors[Array.from(name).reduce((n,ch)=>n+ch.codePointAt(0),0)%colors.length]}
+function updateLabels(preferred=$('labelSelect').value){
+ for(const c of cameras)for(const obj of c.objects||[])labelNames.add(obj.name);
+ $('labelSelect').replaceChildren();for(const name of labelNames){const option=document.createElement('option');option.value=name;option.textContent=name;option.style.color=labelColor(name);$('labelSelect').append(option)}
+ if(labelNames.has(preferred))$('labelSelect').value=preferred;
+ $('labelSelect').style.borderColor=labelColor($('labelSelect').value);
+}
+$('addLabel').onclick=()=>{const name=$('name').value.trim();if(!name){message('추가할 라벨 이름을 입력하세요.',true);return}labelNames.add(name);updateLabels(name);$('name').value='';cameras.forEach(draw);message(`라벨 '${name}' 선택됨. 원하는 이미지에 Include 포인트를 찍으세요.`);if($('selectedOnly').checked)run(()=>refreshImages())};
+function promptAt(obj,frame){return obj.prompts.find(p=>p.frame===frame)}
+function normalizeObjects(seed){return (seed?.objects||[]).map(o=>({id:o.id,name:o.name,prompts:clone(o.prompts||[{frame:o.frame??seed.frame,points:o.points,labels:o.labels}])}))}
+function editTargets(){return cameras.filter(c=>$('labelScope').value==='all'||c.key===$('labelScope').value)}
+async function removeLabel(frameOnly){
+ const name=$('labelSelect').value;if(!name)return;
+ const affected=editTargets().filter(c=>c.objects.some(o=>o.name===name&&(!frameOnly||promptAt(o,c.frame))));
+ if(!affected.length){message('선택한 이미지에 제거할 라벨/프레임 포인트가 없습니다.');return}
+ if(affected.some(c=>c.job.status==='running'))throw Error('해당 이미지의 SAM 생성이 끝난 뒤 수정하세요.');
+ if(!confirm(`${affected.map(c=>c.label).join(', ')}에서 '${name}'의 ${frameOnly?'현재 프레임 포인트':'전체 라벨'}를 제거할까요? 저장 전에는 되돌릴 수 있습니다.`))return;
+ const changes=affected.map(c=>({c,objects:clone(c.objects),dirty:c.dirty}));
+ affected.forEach(c=>{if(frameOnly)c.objects.filter(o=>o.name===name).forEach(o=>o.prompts=o.prompts.filter(p=>p.frame!==c.frame));c.objects=c.objects.filter(o=>frameOnly?o.prompts.length:o.name!==name);c.dirty=true;draw(c)});
+ history.push({changes,label:name});if(!cameras.some(c=>c.objects.some(o=>o.name===name)))labelNames.delete(name);updateLabels();controls();
+ message('제거됨. 저장 후 SAM 마스크 생성을 누르면 남은 기존 마스크는 재사용합니다.');
+}
+$('deleteLabel').onclick=()=>run(()=>removeLabel(false));
+$('clearPrompt').onclick=()=>run(()=>removeLabel(true));
+$('name').onkeydown=e=>{if(e.key==='Enter')$('addLabel').click()};
+$('labelSelect').onchange=()=>{updateLabels();cameras.forEach(draw);if($('selectedOnly').checked)run(()=>refreshImages())};
+$('selectedOnly').onchange=()=>run(()=>refreshImages());
+function message(text,error=false){$('message').textContent=text;$('message').classList.toggle('error',error)}
+function dirty(){return cameras.some(c=>c.dirty)}
+function controls(){
+ document.querySelectorAll('header button,header input,header select').forEach(el=>el.disabled=busy||!ready);
+ $('generate').disabled=busy||!ready||!cameras.some(c=>c.dirty||(c.saved&&(c.saved.objects.length||c.job.base_job_id)&&!['running','awaiting_review','approved'].includes(c.job.status)));
+ $('prev').disabled=busy||!ready||position===0;$('next').disabled=busy||!ready||position===episodes.length-1;
+ $('saveNext').disabled=busy||!ready||position===episodes.length-1;$('undo').disabled=busy||!history.length;
+}
+async function run(fn){if(busy)return;busy=true;controls();try{await fn()}catch(e){message(e.message,true)}finally{busy=false;controls()}}
+async function api(c,path,body){const r=await fetch(`/${c.key}${path}`,{cache:'no-store',...(body?{method:'POST',headers:{'Content-Type':'application/json','X-Label-Token':c.token},body:JSON.stringify(body)}:{})});const value=await r.json();if(!r.ok)throw Error(`${c.label}: ${value.error||r.statusText}`);return value}
+function draw(c){
+ const ctx=c.canvas.getContext('2d');ctx.clearRect(0,0,c.canvas.width,c.canvas.height);if(c.image)ctx.drawImage(c.image,0,0);
+ for(const obj of c.objects||[]){if($('selectedOnly').checked&&obj.name!==$('labelSelect').value)continue;const prompt=promptAt(obj,c.frame);if(!prompt)continue;
+ prompt.points.forEach(([x,y],i)=>{ctx.beginPath();ctx.arc(x,y,Math.max(c.canvas.width/160,4),0,Math.PI*2);ctx.fillStyle=prompt.labels[i]?labelColor(obj.name):'#ff536d';ctx.fill();ctx.lineWidth=2;ctx.strokeStyle='white';ctx.stroke();ctx.font=`${Math.max(c.canvas.width/65,12)}px sans-serif`;ctx.fillStyle=labelColor(obj.name);ctx.fillText(obj.name,x+9,y-9)})}
+ const count=(c.objects||[]).reduce((n,o)=>n+(promptAt(o,c.frame)?.points.length||0),0);
+ c.info.textContent=`프레임 ${c.frame??'—'} · 현재 ${count}개 포인트 · ${c.dirty?'미저장':c.saved?'저장됨':'예시 미작성'}\n라벨: ${(c.objects||[]).map(o=>o.name+' ['+o.prompts.map(p=>p.frame).join(',')+']').join(' · ')}\n${c.meta?.instruction||''}`;
+}
+function maskRevision(c){return ['awaiting_review','approved'].includes(c.job.status)?`${c.job.job_id}:${c.job.seed_hash||''}:${c.job.status}`:''}
+async function frameData(c,frame){const revision=maskRevision(c);const episode=episodes[position];const meta=await api(c,`/api/frame?episode=${episode}&frame=${frame}`);const image=new Image();await new Promise((resolve,reject)=>{image.onload=resolve;image.onerror=()=>reject(Error(`${c.label}: 이미지 로딩 실패`));image.src=`/${c.key}/frame.png?episode=${episode}&frame=${frame}&overlay=${$('overlay').checked?1:0}&label=${encodeURIComponent($('selectedOnly').checked?$('labelSelect').value:'')}&revision=${encodeURIComponent(revision)}&request=${Date.now()}`});return {meta,image,frame,displayedRevision:revision}}
+function installFrame(c,data){Object.assign(c,data);c.canvas.width=data.meta.width;c.canvas.height=data.meta.height;draw(c)}
+function showJob(c){
+ const j=c.job;const names={running:'SAM 생성 중',awaiting_review:'생성 완료 · 검토 대기',approved:'검토 완료',failed:'생성 실패',seed_selected:'예시 저장됨'};
+ c.jobInfo.textContent=(j.status==='running'&&j.stage==='queued'?'SAM 대기열':j.status==='running'&&j.stage==='preparing'?'영상 준비 중':names[j.status]||'SAM 미생성')+(j.status==='running'?` · ${j.completed||0}/${j.total||'?'} 프레임`:'')+(j.error?' · '+j.error:'')+(j.warning?' · '+j.warning:'');
+ c.jobInfo.classList.toggle('error',j.status==='failed'||!!j.warning);
+}
+async function refreshJobs(){
+ const episode=episodes[position];
+ const jobs=await Promise.all(cameras.map(c=>api(c,`/api/job?episode=${episode}`)));
+ if(episode!==episodes[position])return;
+ cameras.forEach((c,i)=>{c.job=jobs[i];showJob(c)});
+ const pending=cameras.filter(c=>maskRevision(c)&&c.displayedRevision!==maskRevision(c));
+ if(ready&&pending.length){await refreshImages(pending);if(episode===episodes[position]&&pending.every(c=>c.displayedRevision===maskRevision(c)))message('SAM 생성 완료 · 현재 프레임의 마스크를 갱신했습니다.');}
+
+}
+async function refreshImages(selected=cameras){
+ const episode=episodes[position];
+ await Promise.all(selected.map(async c=>{const frame=c.frame;const requestId=c.imageRequestId=(c.imageRequestId||0)+1;const data=await frameData(c,frame);if(episode===episodes[position]&&frame===c.frame&&requestId===c.imageRequestId){c.image=data.image;c.displayedRevision=data.displayedRevision;draw(c)}}));
+}
+$('overlay').onchange=()=>run(()=>refreshImages());
+async function loadEpisode(){
+ ready=false;history=[];controls();message('세 카메라 이미지를 불러오는 중…');$('episode').value=episodes[position];
+ const seeds=await Promise.all(cameras.map(c=>api(c,`/api/seed?episode=${episodes[position]}`)));
+ const frames=await Promise.all(cameras.map((c,i)=>frameData(c,seeds[i].frame??0)));
+ cameras.forEach((c,i)=>{c.saved=seeds[i].objects?seeds[i]:null;c.objects=normalizeObjects(c.saved);c.dirty=false;installFrame(c,frames[i])});
+ const length=Math.min(...cameras.map(c=>c.state.episodes.find(e=>e.episode===episodes[position]).length));$('frame').max=length-1;$('frameSlider').max=length-1;setFrameInput(frames[0].frame);$('range').textContent=`0–${length-1} 프레임`;
+ const existing=cameras.find(c=>c.saved);updateLabels(existing?.saved.objects[0]?.name||$('labelSelect').value);if($('selectedOnly').checked)await refreshImages();cameras.forEach(draw);
+ ready=true;await refreshJobs();message(`에피소드 ${episodes[position]} · 저장된 예시가 있으면 해당 프레임을 표시합니다.`);
+}
+function addPoint(c,e){
+ if(busy||!ready)return;if(c.job.status==='running'){message('이 카메라는 SAM 생성 중입니다. 완료 후 수정하세요.',true);return}
+ const name=$('labelSelect').value;if(!name){message('라벨을 추가하세요.',true);return}
+ history.push({c,objects:clone(c.objects),dirty:c.dirty});let obj=c.objects.find(o=>o.name===name);
+ if(!obj){obj={id:Math.max(0,...c.objects.map(o=>o.id),...(c.saved?.objects||[]).map(o=>o.id))+1,name,prompts:[]};c.objects.push(obj)}
+ let prompt=promptAt(obj,c.frame);if(!prompt){prompt={frame:c.frame,points:[],labels:[]};obj.prompts.push(prompt)}
+ const rect=c.canvas.getBoundingClientRect();prompt.points.push([Math.min(c.meta.width-1,Math.max(0,(e.clientX-rect.left)*c.meta.width/rect.width)),Math.min(c.meta.height-1,Math.max(0,(e.clientY-rect.top)*c.meta.height/rect.height))]);prompt.labels.push(mode);c.dirty=true;draw(c);controls();
+}
+function navigate(delta){run(async()=>{if(dirty()&&!confirm('저장하지 않은 포인트를 버리고 이동할까요?'))return;position=Math.max(0,Math.min(episodes.length-1,position+delta));await loadEpisode()})}
+async function save(){
+ const pending=cameras.filter(c=>c.dirty);
+ for(const c of pending){if(c.job.status==='running')throw Error(`${c.label}: SAM 생성 중에는 예시를 수정할 수 없습니다.`);if(c.objects.some(o=>!o.name.trim()||!o.prompts.some(p=>p.labels.includes(1))))throw Error(`${c.label}: 대상마다 Include 포인트가 하나 이상 필요합니다.`)}
+ for(const c of pending){const seed={schema_version:2,episode:episodes[position],camera:c.state.camera,frame:c.frame,width:c.meta.width,height:c.meta.height,instruction:c.meta.instruction,objects:clone(c.objects)};c.job=await api(c,'/api/seed',seed);showJob(c);c.saved=seed;c.dirty=false;history=[];draw(c)}
+ if(pending.length)await refreshImages(pending);const missing=cameras.filter(c=>!c.saved).map(c=>c.label);message(`예시 저장 완료.${missing.length?' 아직 예시 없음: '+missing.join(', '):' 세 카메라 모두 예시가 저장되었습니다.'}`);
+}
+$('include').onclick=()=>{mode=1;$('include').setAttribute('aria-pressed','true');$('exclude').setAttribute('aria-pressed','false')};
+$('exclude').onclick=()=>{mode=0;$('include').setAttribute('aria-pressed','false');$('exclude').setAttribute('aria-pressed','true')};
+$('undo').onclick=()=>{const h=history.pop();if(!h)return;if(h.changes){for(const change of h.changes){const {c,...previous}=change;Object.assign(c,previous);draw(c)}labelNames.add(h.label);updateLabels(h.label);syncFrameInput()}else{h.c.objects=h.objects;h.c.dirty=h.dirty;draw(h.c)}controls()};
+$('generate').onclick=()=>run(async()=>{
+ $('overlay').checked=true;await refreshJobs();await save();
+ const targets=cameras.filter(c=>c.saved&&(c.saved.objects.length||c.job.base_job_id)&&!['running','awaiting_review','approved'].includes(c.job.status));
+ if(!targets.length){message('생성할 새 예시가 없습니다. 실행 중이거나 완료된 작업은 유지합니다.');return}
+ const failures=[];
+ for(const c of targets){try{c.job=await api(c,'/api/complete',{episode:episodes[position]});showJob(c)}catch(e){failures.push(e.message)}}
+ const missing=cameras.filter(c=>!c.saved).map(c=>c.label);
+ message('SAM 생성 요청 완료. 각 카메라 아래에서 진행 상태를 확인하세요.'+(missing.length?' 예시가 없어 제외: '+missing.join(', '):'')+(failures.length?'\n'+failures.join('\n'):''),!!failures.length);
+});
+let polling=false;
+setInterval(async()=>{if(busy||!ready||polling)return;polling=true;try{await refreshJobs();controls()}catch(e){message('진행 상태 확인 실패: '+e.message,true)}finally{polling=false}},3000);
+$('save').onclick=()=>run(save);$('saveNext').onclick=()=>run(async()=>{await save();const missing=cameras.filter(c=>!c.saved);if(missing.length&&!confirm('예시가 없는 카메라가 있습니다. 건너뛰고 다음 에피소드로 갈까요?'))return;if(position<episodes.length-1){position++;await loadEpisode()}});
+$('prev').onclick=()=>navigate(-1);$('next').onclick=()=>navigate(1);
+$('episode').onchange=()=>{const next=episodes.indexOf(Number($('episode').value));$('episode').value=episodes[position];navigate(next-position)};
+function setFrameInput(value){$('frame').value=value;$('frameSlider').value=value}
+function syncFrameInput(){const c=cameras.find(c=>c.key===$('scope').value)||cameras[0];setFrameInput(c.frame)}
+$('scope').onchange=syncFrameInput;
+$('frameSlider').oninput=()=>{$('frame').value=$('frameSlider').value};
+$('frameSlider').onchange=()=>{$('applyFrame').click()};
+$('frame').oninput=()=>{$('frameSlider').value=$('frame').value};
+$('frame').onkeydown=e=>{if(e.key==='Enter')$('applyFrame').click()};
+$('applyFrame').onclick=()=>run(async()=>{
+ const frame=Number($('frame').value);if(!Number.isInteger(frame)||frame<0||frame>Number($('frame').max))throw Error('유효한 프레임 번호를 입력하세요.');
+ const selected=cameras.filter(c=>$('scope').value==='all'||c.key===$('scope').value);
+ const frames=await Promise.all(selected.map(c=>frameData(c,frame)));selected.forEach((c,i)=>installFrame(c,frames[i]));setFrameInput(frame);
+ message('기존 포인트를 유지한 채 프레임을 이동했습니다. 놓친 대상의 포인트를 추가할 수 있습니다.');
+});
+window.addEventListener('beforeunload',e=>{if(dirty()){e.preventDefault();e.returnValue=''}});
+window.addEventListener('keydown',e=>{if(busy||!ready||/INPUT|SELECT|TEXTAREA/.test(e.target.tagName)||e.altKey||e.ctrlKey||e.metaKey)return;if(e.key==='ArrowLeft'||e.key==='ArrowRight'){e.preventDefault();navigate(e.key==='ArrowLeft'?-1:1)}});
+run(async()=>{await Promise.all(cameras.map(async c=>{const [server,state]=await Promise.all([api(c,'/api/server'),api(c,'/api/state')]);c.token=server.token;c.state=state}));const datasetName=cameras[0].state.dataset.split('/').filter(Boolean).at(-1);document.querySelector('h1').textContent=datasetName+' · 세 카메라 공통 라벨링';document.title=datasetName+' · 라벨링';episodes=cameras[0].state.episodes.map(e=>e.episode).filter(id=>cameras.every(c=>c.state.episodes.some(e=>e.episode===id)));if(!episodes.length)throw Error('공통 에피소드가 없습니다.');for(const id of episodes){const option=document.createElement('option');option.value=id;option.textContent=`에피소드 ${String(id).padStart(6,'0')}`;$('episode').append(option)}await loadEpisode()});
+</script></html>

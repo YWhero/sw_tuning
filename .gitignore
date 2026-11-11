@@ -1,0 +1,15 @@
+/data/
+/logs/
+/cache/
+/checkpoints/
+/results/
+/backups/
+/model/
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+**/.ruff_cache/
+**/.env
+**/config.env
+**/.aws/
+*.egg-info/

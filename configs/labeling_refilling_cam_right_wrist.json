@@ -1,0 +1,8 @@
+{
+  "dataset": "data/Refilling_Dispenser_lerobot_v21",
+  "camera": "observation.images.rgb.cam_right_wrist",
+  "gpu": 0,
+  "semantic_all_candidates": true,
+  "render_review_video": false,
+  "resident_socket": "logs/labeling_sam.sock"
+}
